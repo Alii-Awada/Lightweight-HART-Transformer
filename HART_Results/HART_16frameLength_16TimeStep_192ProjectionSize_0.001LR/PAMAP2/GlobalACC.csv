@@ -1,0 +1,11 @@
+Results on server model on ALL testsets,
+"
+Train:",99.56
+"
+Validation:",92.03
+"
+Test weighted f1:",84.96000000000001
+"
+Test micro f1:",85.22
+"
+Test macro f1:",83.36
