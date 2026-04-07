@@ -15,17 +15,8 @@ ACTIVITY_MAP = {
     5: "running",
     6: "cycling",
     7: "nordic_walking",
-    9: "watching_tv",
-    10: "computer_work",
-    11: "car_driving",
     12: "ascending_stairs",
     13: "descending_stairs",
-    16: "vacuum_cleaning",
-    17: "ironing",
-    18: "folding_laundry",
-    19: "house_cleaning",
-    20: "playing_soccer",
-    24: "rope_jumping",
 }
 
 SENSOR_BASE_COLUMN = {
@@ -35,6 +26,7 @@ SENSOR_BASE_COLUMN = {
 }
 
 SENSOR_LOCATION = "hand"
+SENSOR_CHANNEL_MODE = "acc_gyro"  # acc_only | acc_gyro
 SEGMENT_SIZE = 128
 STEP_SIZE = 64
 
@@ -42,7 +34,12 @@ STEP_SIZE = 64
 def get_usecols(sensor_location):
     base = SENSOR_BASE_COLUMN[sensor_location]
     acc16 = [base + 1, base + 2, base + 3]
-    return [1] + acc16
+    if SENSOR_CHANNEL_MODE == "acc_only":
+        return [0, 1] + acc16
+    if SENSOR_CHANNEL_MODE == "acc_gyro":
+        gyro = [base + 7, base + 8, base + 9]
+        return [0, 1] + acc16 + gyro
+    raise ValueError("Unsupported SENSOR_CHANNEL_MODE: " + str(SENSOR_CHANNEL_MODE))
 
 
 def load_subject(filepath, sensor_location):
@@ -50,23 +47,31 @@ def load_subject(filepath, sensor_location):
     df = pd.read_csv(filepath, header=None, sep=r"\s+", usecols=usecols, engine="python")
     df = df.dropna()
     df = df[df[1].isin(ACTIVITY_MAP.keys())]
+    timestamps = df[0].to_numpy(dtype=np.float32)
     labels = df[1].astype(int).to_numpy()
-    data = df.drop(columns=[1]).to_numpy(dtype=np.float32)
-    return data, labels
+    data = df.drop(columns=[0, 1]).to_numpy(dtype=np.float32)
+    return data, labels, timestamps
 
 
-def create_windows(data, labels, segment_size, step_size):
+def create_windows_gapaware(data, labels, timestamps, segment_size, step_size, max_gap_ms=25):
+    """Window each contiguous chunk independently."""
+    dt = np.diff(timestamps)
+    gap_indices = np.where(dt > max_gap_ms)[0] + 1
+    chunk_boundaries = [0] + gap_indices.tolist() + [len(data)]
+
     segments = []
     segment_labels = []
-    start = 0
-    while start + segment_size <= len(data):
-        end = start + segment_size
-        window_labels = labels[start:end]
-        if np.all(window_labels == window_labels[0]):
-            segments.append(data[start:end])
-            segment_labels.append(window_labels[0])
-        start += step_size
-    if len(segments) == 0:
+    for start_idx, end_idx in zip(chunk_boundaries, chunk_boundaries[1:]):
+        chunk_data = data[start_idx:end_idx]
+        chunk_labels = labels[start_idx:end_idx]
+        pos = 0
+        while pos + segment_size <= len(chunk_data):
+            window_labels = chunk_labels[pos:pos + segment_size]
+            if np.all(window_labels == window_labels[0]):
+                segments.append(chunk_data[pos:pos + segment_size])
+                segment_labels.append(window_labels[0])
+            pos += step_size
+    if not segments:
         return (
             np.empty((0, segment_size, data.shape[1]), dtype=np.float32),
             np.empty((0,), dtype=np.int32),
@@ -100,11 +105,11 @@ def main():
     all_subject_labels = []
 
     for subject_path in subject_files:
-        data, labels = load_subject(subject_path, SENSOR_LOCATION)
+        data, labels, timestamps = load_subject(subject_path, SENSOR_LOCATION)
         if data.size == 0:
             continue
-        windows, window_labels = create_windows(
-            data, labels, SEGMENT_SIZE, STEP_SIZE
+        windows, window_labels = create_windows_gapaware(
+            data, labels, timestamps, SEGMENT_SIZE, STEP_SIZE
         )
         if windows.size == 0:
             continue
@@ -115,15 +120,21 @@ def main():
     if len(all_subject_data) == 0:
         raise RuntimeError("No PAMAP2 segments created. Check filters and window size.")
 
-    combined_data = np.vstack(all_subject_data)
-    acc = combined_data[:, :, :3]
-    acc_mean = np.mean(acc)
-    acc_std = np.std(acc)
+    if len(all_subject_data) < 2:
+        raise RuntimeError("Train-only normalization requires at least two PAMAP2 subjects.")
 
     normalized_subject_data = []
-    for subject_data in all_subject_data:
-        subject_acc = (subject_data[:, :, :3] - acc_mean) / acc_std
-        normalized_subject_data.append(subject_acc)
+    for held_out_subject, subject_data in enumerate(all_subject_data):
+        train_subject_indices = [
+            i for i in range(len(all_subject_data)) if i != held_out_subject
+        ]
+        combined_train = np.vstack(
+            [all_subject_data[i] for i in train_subject_indices]
+        )
+        channel_mean = np.mean(combined_train, axis=(0, 1), keepdims=True)
+        channel_std = np.std(combined_train, axis=(0, 1), keepdims=True)
+        channel_std = np.where(channel_std < 1e-8, 1.0, channel_std)
+        normalized_subject_data.append((subject_data - channel_mean) / channel_std)
 
     data_name = "PAMAP2"
     os.makedirs("datasetStandardized/" + data_name, exist_ok=True)
@@ -150,7 +161,10 @@ def main():
                 + "\n"
             )
 
-    print("PAMAP2 processing finished")
+    print(
+        "PAMAP2 processing finished "
+        f"(sensor={SENSOR_LOCATION}, mode={SENSOR_CHANNEL_MODE}, channels={normalized_subject_data[0].shape[-1]})"
+    )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,43 @@
+# ── Virtual environment ───────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Model weights (large binary files — too large for GitHub) ─────────────────
+HART_Results/HART_*/
+HART_Results/pruning/
+
+# ── TFLite models (kept in HART_Results subdirs above, excluded with parent) ──
+*.tflite
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS artefacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.suo
+*.user
+
+# ── Temp / logs ───────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+
+# ── Dataset binaries (already tracked — do not re-add if removed) ─────────────
+# Uncomment the lines below ONLY if you want to stop tracking .hkl files.
+# You will also need to run: git rm --cached datasetStandardized/PAMAP2/*.hkl
+# datasetStandardized/PAMAP2/*.hkl
