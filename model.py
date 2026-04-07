@@ -18,6 +18,8 @@ class DropPath(layers.Layer):
         self.drop_prob = drop_prob
 
     def call(self, x,training=None):
+        if self.drop_prob == 0.0:
+            return x
         if(training):
             input_shape = tf.shape(x)
             batch_size = input_shape[0]
@@ -132,11 +134,11 @@ class SensorWiseMHA(layers.Layer):
     def call(self, inputData, training=None, return_attention_scores = False):
         extractedInput = inputData[:,:,self.startIndex:self.stopIndex]
         if(return_attention_scores):
-            MHA_Outputs, attentionScores = self.MHA(extractedInput,extractedInput,return_attention_scores = True )
+            MHA_Outputs, attentionScores = self.MHA(extractedInput, extractedInput, return_attention_scores=True, training=training)
             return MHA_Outputs , attentionScores
         else:
-            MHA_Outputs = self.MHA(extractedInput,extractedInput)
-            MHA_Outputs = self.DropPath(MHA_Outputs)
+            MHA_Outputs = self.MHA(extractedInput,extractedInput,training=training)
+            MHA_Outputs = self.DropPath(MHA_Outputs, training=training)
             return MHA_Outputs
         
     def get_config(self):
@@ -229,6 +231,8 @@ class liteFormer(layers.Layer):
         self.softmax = tf.nn.softmax
         self.projectionSize = projectionSize
         self.attentionHead = attentionHead
+        self.dropPathRate = dropPathRate
+        self.dropout_rate = dropout_rate
         self.DropPathLayer = DropPath(dropPathRate)
         self.projectionHalf = projectionSize // 2
 
@@ -271,7 +275,7 @@ class liteFormer(layers.Layer):
             ) for convIndex in range(self.attentionHead)
         ]
         convOutputs = tf.stack(convOutputs, axis=2)
-        convOutputsDropPath = self.DropPathLayer(convOutputs)
+        convOutputsDropPath = self.DropPathLayer(convOutputs, training=training)
         localAttention = tf.reshape(convOutputsDropPath, (-1, inputShape[1], self.projectionSize))
         return localAttention
 
@@ -284,6 +288,8 @@ class liteFormer(layers.Layer):
             'stopIndex': self.stopIndex,
             'projectionSize': self.projectionSize,
             'attentionHead': self.attentionHead,
+            'dropPathRate': self.dropPathRate,
+            'dropout_rate': self.dropout_rate,
         })
         return config
 
@@ -343,7 +349,7 @@ class SensorPatchesTimeDistributed(layers.Layer):
         self.accProjection = layers.TimeDistributed(layers.Conv1D(filters = filterCount,kernel_size = self.kernelSize,strides = 1, data_format = "channels_last"))
         self.gyroProjection = layers.TimeDistributed(layers.Conv1D(filters = filterCount,kernel_size = self.kernelSize,strides = 1, data_format = "channels_last"))
         self.flattenTime = layers.TimeDistributed(layers.Flatten())
-        assert (projection_dim//2 + filterCount) / filterCount % self.kernelSize == 0
+        assert (projection_dim//2 + filterCount) // filterCount % self.kernelSize == 0
         print("Kernel Size is "+str((projection_dim//2 + filterCount) / filterCount))
 #         assert 
     def call(self, inputData):
@@ -363,22 +369,25 @@ class SensorPatchesTimeDistributed(layers.Layer):
         return config
     
 class SensorPatches(layers.Layer):
-    def __init__(self, projection_dim, patchSize,timeStep, **kwargs):
+    def __init__(self, projection_dim, patchSize, timeStep, channelsCount=3, **kwargs):
         super(SensorPatches, self).__init__(**kwargs)
         self.patchSize = patchSize
         self.timeStep = timeStep
         self.projection_dim = projection_dim
-        self.accProjection = layers.Conv1D(filters = int(projection_dim),kernel_size = patchSize,strides = timeStep, data_format = "channels_last")
-    def call(self, inputData):
+        self.channelsCount = channelsCount
+        self.accProjection = layers.Conv1D(filters=int(projection_dim), kernel_size=patchSize, strides=timeStep, data_format="channels_last")
 
-        accProjections = self.accProjection(inputData[:,:,:3])
+    def call(self, inputData):
+        accProjections = self.accProjection(inputData[:, :, :self.channelsCount])
         return accProjections
+
     def get_config(self):
         config = super().get_config().copy()
         config.update({
             'patchSize': self.patchSize,
             'projection_dim': self.projection_dim,
-            'timeStep': self.timeStep,})
+            'timeStep': self.timeStep,
+            'channelsCount': self.channelsCount,})
         return config
 
 
@@ -511,12 +520,16 @@ def HART(
     convKernels=[3, 7, 15, 31, 31, 31],
     mlp_head_units=[1024],
     dropout_rate=0.3,
+    attention_dropout=0.1,
+    mlp_dropout=0.1,
+    token_dropout=0.1,
+    drop_path_rate=0.1,
     useTokens=True,
     useEnhancedTokenizer=True,
 ):
     projectionHalf = projection_dim//2
     projectionQuarter = projection_dim//4
-    dropPathRate = np.linspace(0, dropout_rate* 10, len(convKernels)) * 0.1
+    dropPathRate = np.linspace(0.0, drop_path_rate, len(convKernels))
     transformer_units = [
     projection_dim * 2,
     projection_dim,]  
@@ -524,13 +537,13 @@ def HART(
     if useEnhancedTokenizer:
         patches = MultiScaleSensorPatches(projection_dim, patchSize, timeStep, channelsCount=input_shape[-1])(inputs)
     else:
-        patches = SensorPatches(projection_dim, patchSize, timeStep)(inputs)
+        patches = SensorPatches(projection_dim, patchSize, timeStep, channelsCount=input_shape[-1])(inputs)
     if(useTokens):
         patches = ClassToken(projection_dim)(patches)
     patchCount = patches.shape[1] 
     encoded_patches = PatchEncoder(patchCount, projection_dim)(patches)
     if useEnhancedTokenizer:
-        encoded_patches = layers.Dropout(dropout_rate * 0.5, name="tokenDropout")(encoded_patches)
+        encoded_patches = layers.Dropout(token_dropout, name="tokenDropout")(encoded_patches)
     global_key_dim = max(1, projection_dim // num_heads)
     # Create multiple layers of the Transformer block.
     for layerIndex, kernelLength in enumerate(convKernels):        
@@ -539,7 +552,7 @@ def HART(
             globalSelfAttention = layers.MultiHeadAttention(
                 num_heads=num_heads,
                 key_dim=global_key_dim,
-                dropout=dropout_rate,
+                dropout=attention_dropout,
                 name="GlobalMHA_" + str(layerIndex),
             )(x1, x1)
         branch1 = liteFormer(
@@ -553,9 +566,9 @@ def HART(
                           name = "liteFormer_"+str(layerIndex))(x1)
 
                           
-        branch2Acc = SensorWiseMHA(projectionQuarter,num_heads,0,projectionQuarter,dropPathRate = dropPathRate[layerIndex],dropout_rate = dropout_rate,name = "AccMHA_"+str(layerIndex))(x1)
+        branch2Acc = SensorWiseMHA(projectionQuarter,num_heads,0,projectionQuarter,dropPathRate = dropPathRate[layerIndex],dropout_rate = attention_dropout,name = "AccMHA_"+str(layerIndex))(x1)
 
-        branch2Gyro = SensorWiseMHA(projectionQuarter,num_heads,projectionQuarter + projectionHalf ,projection_dim,dropPathRate = dropPathRate[layerIndex],dropout_rate = dropout_rate, name = "GyroMHA_"+str(layerIndex))(x1)
+        branch2Gyro = SensorWiseMHA(projectionQuarter,num_heads,projectionQuarter + projectionHalf ,projection_dim,dropPathRate = dropPathRate[layerIndex],dropout_rate = attention_dropout, name = "GyroMHA_"+str(layerIndex))(x1)
         concatAttention = layers.Concatenate(axis=2)((branch2Acc,branch1,branch2Gyro))
         if useEnhancedTokenizer:
             fusedAttention = layers.Add(name="FusedAttention_" + str(layerIndex))([concatAttention, globalSelfAttention])
@@ -565,7 +578,7 @@ def HART(
         
         x2 = layers.Add()([fusedAttention, encoded_patches])
         x3 = layers.LayerNormalization(epsilon=1e-6)(x2)
-        x3 = mlp2(x3, hidden_units=transformer_units, dropout_rate=dropout_rate)
+        x3 = mlp2(x3, hidden_units=transformer_units, dropout_rate=mlp_dropout)
         x3 = DropPath(dropPathRate[layerIndex])(x3)
         encoded_patches = layers.Add()([x3, x2])
     representation = layers.LayerNormalization(epsilon=1e-6)(encoded_patches)
@@ -601,16 +614,15 @@ def inverted_residual_block(x, expanded_channels, output_channels, strides=1):
     m = layers.Conv1D(output_channels, 1, padding="same", use_bias=False)(m)
     m = layers.BatchNormalization()(m)
     
-    if tf.math.equal(x.shape[-1], output_channels) and strides == 1:
+    if x.shape[-1] == output_channels and strides == 1:
         return layers.Add()([m, x])
     return m
 
 def transformer_block(x, transformer_layers, projection_dim, dropout_rate = 0.3,num_heads=2):
-    
-    dropPathRate = np.linspace(0, dropout_rate* 10,transformer_layers) * 0.1
 
-    
-    for _ in range(transformer_layers):
+    dropPathRates = np.linspace(0, dropout_rate * 10, transformer_layers) * 0.1
+
+    for layerIdx in range(transformer_layers):
         # Layer normalization 1.
         x1 = layers.LayerNormalization(epsilon=1e-6)(x)
         # Create a multi-head attention layer.
@@ -627,6 +639,7 @@ def transformer_block(x, transformer_layers, projection_dim, dropout_rate = 0.3,
             hidden_units=[x.shape[-1] * 2, x.shape[-1]],
             dropout_rate=dropout_rate,
         )
+        x3 = DropPath(dropPathRates[layerIdx])(x3)
         # Skip connection 2.
         x = layers.Add()([x3, x2])
 

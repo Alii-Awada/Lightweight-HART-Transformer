@@ -22,25 +22,38 @@ def get_available_cpus():
 
 
 class dataHolder:
-    clientDataTrain = []
-    clientLabelTrain = []
-    clientDataTest = []
-    clientLabelTest = []
-    centralTrainData = []
-    centralTrainLabel = []
-    centralTestData = []
-    centralTestLabel = []
-    clientOrientationTrain = []
-    clientOrientationTest = []
-    orientationsNames = None
-    activityLabels = []
-    clientCount = None
+    def __init__(self):
+        self.clientDataTrain = []
+        self.clientLabelTrain = []
+        self.clientDataTest = []
+        self.clientLabelTest = []
+        self.centralTrainData = []
+        self.centralTrainLabel = []
+        self.centralTestData = []
+        self.centralTestLabel = []
+        self.clientOrientationTrain = []
+        self.clientOrientationTest = []
+        self.orientationsNames = None
+        self.activityLabels = []
+        self.clientCount = None
+        # Fold / split metadata
+        self.testFoldIndex = None   # which fold index was held out as the test set
+        self.nFolds = None           # total number of folds used in the stratified split
+        self.testSplitPct = None     # size of the test set as a percentage (e.g. 20.0)
 
 
 def returnClientByDataset(dataSetName):
-    if dataSetName == "PAMAP2":
-        return 9
-    raise ValueError("Unknown dataset")
+    client_map = {
+        "PAMAP2": 9,
+        "UCI": 30,
+        "RealWorld": 15,
+        "HHAR": 9,
+        "MotionSense": 24,
+        "SHL_128": 3,
+    }
+    if dataSetName in client_map:
+        return client_map[dataSetName]
+    raise ValueError(f"Unknown dataset: '{dataSetName}'. Supported: {list(client_map.keys())}")
 
 
 def projectTSNE(fileName, filepath, ACTIVITY_LABEL, labels_argmax, tsne_projections, unique_labels):
@@ -117,7 +130,7 @@ def projectTSNEWithPosition(
 
 def loadDataset(dataSetName, clientCount, dataConfig, randomSeed, mainDir, StratifiedSplit=True):
     if dataSetName != "PAMAP2":
-        raise ValueError("Unknown dataset")
+        raise ValueError(f"loadDataset does not support '{dataSetName}'. Only 'PAMAP2' is currently implemented.")
 
     clientDataTrain = []
     clientLabelTrain = []
@@ -131,13 +144,16 @@ def loadDataset(dataSetName, clientCount, dataConfig, randomSeed, mainDir, Strat
         clientData.append(hkl.load(mainDir + "datasetStandardized/PAMAP2/UserData" + str(i) + ".hkl"))
         clientLabel.append(hkl.load(mainDir + "datasetStandardized/PAMAP2/UserLabel" + str(i) + ".hkl"))
 
+    N_FOLDS = 5
+    TEST_FOLD_INDEX = 2
+
     for i in range(0, clientCount):
-        skf = StratifiedKFold(n_splits=5, shuffle=False)
+        skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=False)
         skf.get_n_splits(clientData[i], clientLabel[i])
         trainIndex = []
         testIndex = []
         for enu_index, (train_index, test_index) in enumerate(skf.split(clientData[i], clientLabel[i])):
-            if enu_index != 2:
+            if enu_index != TEST_FOLD_INDEX:
                 trainIndex.append(test_index)
             else:
                 testIndex = test_index
@@ -153,7 +169,10 @@ def loadDataset(dataSetName, clientCount, dataConfig, randomSeed, mainDir, Strat
     centralTestData = np.vstack((clientDataTest))
     centralTestLabel = np.hstack((clientLabelTest))
 
-    dataReturn = dataHolder
+    N_FOLDS = 5
+    TEST_FOLD_INDEX = 2
+
+    dataReturn = dataHolder()
     dataReturn.clientDataTrain = clientDataTrain
     dataReturn.clientLabelTrain = clientLabelTrain
     dataReturn.clientDataTest = clientDataTest
@@ -165,6 +184,9 @@ def loadDataset(dataSetName, clientCount, dataConfig, randomSeed, mainDir, Strat
     dataReturn.clientOrientationTrain = []
     dataReturn.clientOrientationTest = []
     dataReturn.orientationsNames = None
+    dataReturn.testFoldIndex = TEST_FOLD_INDEX
+    dataReturn.nFolds = N_FOLDS
+    dataReturn.testSplitPct = round(100.0 / N_FOLDS, 1)
     return dataReturn
 
 
